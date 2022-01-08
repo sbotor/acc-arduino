@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <avr/sleep.h>
+
 #include <PCD8544.h>
 #include <Adafruit_LIS3DH.h>
 
@@ -11,7 +13,8 @@
 
 #define SDA A4
 #define SDL A5
-#define ACC_SAMPLE_DELAY 500
+#define INTERRUPT 2
+#define ACC_DELAY 500
 
 #define LEDC 4
 #define LEDR 5
@@ -21,10 +24,10 @@
 #define DELTA 0.5
 
 #define BUTTON A1
-#define BUTTON_SAMPLE_DELAY 50
-#define MAX_SWITCH_TIME 1000
+#define BASE_DELAY 50
 #define CALIBRATE_HOLD_TIME 3000
 #define RESET_HOLD_TIME 7000
+#define TIME_TO_SLEEP 5000
 
 enum class display_mode
 {
@@ -43,15 +46,44 @@ display_mode display = display_mode::ACC;
 PCD8544 lcd = PCD8544(LCD_SCK, LCD_DIN, LCD_DC, LCD_RST, LCD_CS);
 
 Adafruit_LIS3DH lis3dh = Adafruit_LIS3DH();
+#define CLICK_THRESHOLD 1
 
 float offsets[3] = { 0.0 };
-const int sample_count = ACC_SAMPLE_DELAY / BUTTON_SAMPLE_DELAY;
+const int sample_count = ACC_DELAY / BASE_DELAY;
 int acc_counter = 1;
+bool custom_offsets = false;
 
-const int switch_threshold = MAX_SWITCH_TIME / BUTTON_SAMPLE_DELAY;
-const int calibrate_hold_count = CALIBRATE_HOLD_TIME / BUTTON_SAMPLE_DELAY;
-const int reset_hold_count = RESET_HOLD_TIME / BUTTON_SAMPLE_DELAY;
+const int calibrate_hold_count = CALIBRATE_HOLD_TIME / BASE_DELAY;
+const int reset_hold_count = RESET_HOLD_TIME / BASE_DELAY;
 int hold_counter = 0;
+
+const int sleep_threshold = TIME_TO_SLEEP / BASE_DELAY;
+int sleep_counter = 0;
+
+void read_offsets()
+{
+  EEPROM.get(0, offsets[0]);
+  EEPROM.get(4, offsets[1]);
+  EEPROM.get(8, offsets[2]);
+
+  if (offsets[0] == offsets[1] && offsets[1] == offsets[2] && offsets[2] == 0)
+  {
+    custom_offsets = false;
+  }
+  else
+  {
+    custom_offsets = true;
+  }
+}
+
+void clear_leds()
+{
+  digitalWrite(LEDC, 1);
+  digitalWrite(LEDF, 1);
+  digitalWrite(LEDR, 1);
+  digitalWrite(LEDB, 1);
+  digitalWrite(LEDL, 1);
+}
 
 void setup()
 {
@@ -62,8 +94,12 @@ void setup()
   pinMode(LEDL, OUTPUT);
 
   pinMode(BUTTON, INPUT);
+  pinMode(INTERRUPT, INPUT);
+
+  clear_leds();
 
   lcd.begin(84, 48);
+  lcd.clear();
 
   if (!lis3dh.begin(0x18))
   {
@@ -76,18 +112,19 @@ void setup()
   lis3dh.setDataRate(LIS3DH_DATARATE_10_HZ);
   lis3dh.setRange(LIS3DH_RANGE_2_G);
 
-  EEPROM.get(0, offsets[0]);
-  EEPROM.get(4, offsets[1]);
-  EEPROM.get(8, offsets[2]);
+  read_offsets();
+}
+
+void save_offsets()
+{
+    EEPROM.put(0, offsets[0]);
+    EEPROM.put(4, offsets[1]);
+    EEPROM.put(8, offsets[2]);
 }
 
 void light_leds(float *values)
 {
-  digitalWrite(LEDC, 1);
-  digitalWrite(LEDF, 1);
-  digitalWrite(LEDR, 1);
-  digitalWrite(LEDB, 1);
-  digitalWrite(LEDL, 1);
+  clear_leds();
   bool flat = true;
 
   if (abs(values[0]) > DELTA)
@@ -175,6 +212,11 @@ void print_acc(sensors_event_t &event)
   calc_acc(values);
 
   lcd.clear();
+  if (custom_offsets)
+  {
+    lcd.print("*");
+  }
+
   switch (display)
   {
   case display_mode::ACC:
@@ -203,9 +245,9 @@ void print_acc(sensors_event_t &event)
     lcd.print(values[2]);
   }
 
-  lcd.setCursor(0, 4);
-  lcd.print("a: ");
-  lcd.print(values[3]);
+  // lcd.setCursor(0, 4);
+  // lcd.print("a: ");
+  // lcd.print(values[3]);
   
   // lcd.setCursor(0, 5);
   // lcd.print("T: ");
@@ -243,9 +285,9 @@ void calibrate()
   offsets[1] = -new_offsets[1] / 25;
   offsets[2] = -new_offsets[2] / 25;
 
-  EEPROM.put(0, offsets[0]);
-  EEPROM.put(4, offsets[1]);
-  EEPROM.put(8, offsets[2]);
+  save_offsets();
+
+  custom_offsets = true;
 
   lcd.clear();
   lcd.print("Calibration success.");
@@ -262,46 +304,74 @@ void reset()
   offsets[1] = 0.0;
   offsets[2] = 0.0;
 
-  EEPROM.put(0, 0.0);
-  EEPROM.put(4, 0.0);
-  EEPROM.put(8, 0.0);
+  save_offsets();
+
+  custom_offsets = false;
 
   delay(3000);
   lcd.clear();
 }
 
+void wake_up()
+{
+  sleep_disable();
+  detachInterrupt(digitalPinToInterrupt(INTERRUPT));
+}
+
+void go_to_sleep()
+{
+  lis3dh.setClick(1, CLICK_THRESHOLD);
+  delay(1000);
+  lcd.clear();
+  clear_leds();
+
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT), wake_up, CHANGE);
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  sleep_enable();
+  sleep_cpu();
+}
+
 void loop()
 {
-
+  if (sleep_counter == sleep_threshold)
+  {
+    go_to_sleep();
+    sleep_counter = 0;
+  }
+  
   if (digitalRead(BUTTON) == LOW)
   {
     ++hold_counter;
+    sleep_counter = 0;
 
     if (hold_counter >= calibrate_hold_count)
     {
       lcd.clear();
       lcd.print("Release the button to calibrate, hold further to reset.");
+      
       while (digitalRead(BUTTON) == LOW)
       {
         if (++hold_counter == reset_hold_count)
         {
           break;
         }
-        delay(BUTTON_SAMPLE_DELAY);
+        delay(BASE_DELAY);
       }
+      
       if (hold_counter < reset_hold_count)
       {
         calibrate();
         hold_counter = 0;
       }
     }
+
     if (hold_counter == reset_hold_count)
     {
       lcd.clear();
       lcd.print("Release the button to reset.");
       while (digitalRead(BUTTON) == LOW)
       {
-        delay(BUTTON_SAMPLE_DELAY);
+        delay(BASE_DELAY);
       }
       reset();
       hold_counter = 0;
@@ -314,6 +384,7 @@ void loop()
       ++display;
     }
     hold_counter = 0;
+    ++sleep_counter;
   }
 
   if (acc_counter == sample_count)
@@ -329,5 +400,5 @@ void loop()
     acc_counter++;
   }
 
-  delay(BUTTON_SAMPLE_DELAY);
+  delay(BASE_DELAY);
 }
