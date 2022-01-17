@@ -21,13 +21,18 @@
 #define LEDB 6
 #define LEDL 7
 #define LEDF 8
-#define DELTA 0.5
+
+#define DELTA_A 0.5
 
 #define BUTTON A1
 #define BASE_DELAY 50
 #define CALIBRATE_HOLD_TIME 3000
 #define RESET_HOLD_TIME 7000
 #define TIME_TO_SLEEP 5000
+
+#define CALIBRATION_DELAY 100
+#define CALIBRATION_SAMPLE_SIZE 20
+const float cal_size_inverse = 1.0 / CALIBRATION_SAMPLE_SIZE;
 
 enum class display_mode
 {
@@ -48,7 +53,9 @@ PCD8544 lcd = PCD8544(LCD_SCK, LCD_DIN, LCD_DC, LCD_RST, LCD_CS);
 Adafruit_LIS3DH lis3dh = Adafruit_LIS3DH();
 #define CLICK_THRESHOLD 1
 
-float offsets[3] = { 0.0 };
+float raw_acc[3] = {0.0};
+float offset_acc[3] = {0.0};
+float offsets[3] = {0.0};
 const int sample_count = ACC_DELAY / BASE_DELAY;
 int acc_counter = 1;
 bool custom_offsets = false;
@@ -117,21 +124,21 @@ void setup()
 
 void save_offsets()
 {
-    EEPROM.put(0, offsets[0]);
-    EEPROM.put(4, offsets[1]);
-    EEPROM.put(8, offsets[2]);
+  EEPROM.put(0, offsets[0]);
+  EEPROM.put(4, offsets[1]);
+  EEPROM.put(8, offsets[2]);
 }
 
-void light_leds(float *values)
+void light_leds(float* vals)
 {
   clear_leds();
   bool flat = true;
 
-  if (abs(values[0]) > DELTA)
+  if (abs(vals[0]) > DELTA_A)
   {
     flat = false;
 
-    if (values[0] > 0)
+    if (vals[0] > 0)
     {
       digitalWrite(LEDL, 1);
       digitalWrite(LEDR, 0);
@@ -143,11 +150,11 @@ void light_leds(float *values)
     }
   }
 
-  if (abs(values[1]) > DELTA)
+  if (abs(vals[1]) > DELTA_A)
   {
     flat = false;
 
-    if (values[1] > 0)
+    if (vals[1] > 0)
     {
       digitalWrite(LEDB, 1);
       digitalWrite(LEDF, 0);
@@ -170,13 +177,21 @@ void light_leds(float *values)
   }
 }
 
-void calc_acc(float *values)
+void calc_acc(sensors_event_t &event, float *values)
 {
+  raw_acc[0] = event.acceleration.x;
+  raw_acc[1] = event.acceleration.y;
+  raw_acc[2] = event.acceleration.z;
+
+  offset_acc[0] = values[0] = raw_acc[0] + offsets[0];
+  offset_acc[1] = values[1] = raw_acc[1] + offsets[1];
+  offset_acc[2] = values[2] = raw_acc[2] + offsets[2];
+
   float x_2 = values[0] * values[0],
         y_2 = values[1] * values[1],
         z_2 = values[2] * values[2];
 
-  values[3] = sqrt(x_2 + y_2 + z_2);
+  //values[3] = sqrt(x_2 + y_2 + z_2);
 
   switch (display)
   {
@@ -197,24 +212,25 @@ void calc_acc(float *values)
     break;
   }
   }
+
+  if (offset_acc[0] < 0)
+  {
+    values[0] *= -1.0;
+  }
+  if (offset_acc[1] < 0)
+  {
+    values[1] *= -1.0;
+  }
 }
 
-void print_acc(sensors_event_t &event)
+void print_acc(float *values)
 {
-  float values[4] = {
-      event.acceleration.x + offsets[0],
-      event.acceleration.y + offsets[1],
-      event.acceleration.z + offsets[2],
-      0.0};
-
-  light_leds(values);
-
-  calc_acc(values);
+  light_leds(offset_acc);
 
   lcd.clear();
   if (custom_offsets)
   {
-    lcd.print("*");
+    lcd.print("* ");
   }
 
   switch (display)
@@ -230,81 +246,68 @@ void print_acc(sensors_event_t &event)
     break;
   }
 
-  lcd.setCursor(0, 1);
+  lcd.setCursor(0, 2);
   lcd.print("X: ");
   lcd.print(values[0]);
 
-  lcd.setCursor(0, 2);
+  lcd.setCursor(0, 3);
   lcd.print("Y: ");
   lcd.print(values[1]);
 
   if (display == display_mode::ACC)
   {
-    lcd.setCursor(0, 3);
+    lcd.setCursor(0, 4);
     lcd.print("Z: ");
     lcd.print(values[2]);
   }
-
-  // lcd.setCursor(0, 4);
-  // lcd.print("a: ");
-  // lcd.print(values[3]);
-  
-  // lcd.setCursor(0, 5);
-  // lcd.print("T: ");
-  // lcd.print(event.temperature);
 }
 
 void calibrate()
 {
   float new_offsets[3] = {0.0};
-  const int times = 3, // TODO
-    rate = 100,
-    samples = 1000 / rate,
-    total = samples * times;
 
-  for (int i = 0; i < times; i++)
+  lcd.clear();
+  lcd.print("Calibrating, please wait.");
+
+  for (int i = 0; i < CALIBRATION_SAMPLE_SIZE; i++)
   {
-    lcd.clear();
-    lcd.print("Calibrating, please wait.");
+    char buffer[32] = {0};
+    float prog = 100.0 * i * cal_size_inverse;
+
     lcd.setCursor(0, 2);
-
-    char buffer[64] = {0};
-    float prog = 100.0 * i / times;
-    sprintf(buffer, "Progress: %.1f%%", prog);
+    lcd.print("Progress:");
+    sprintf(buffer, "%.1f\%", prog);
+    lcd.setCursor(0, 4);
     lcd.print(buffer);
-    
-    for (int j = 0; j < samples; j++)
-    {
-      sensors_event_t event;
-      lis3dh.getEvent(&event);
 
-      new_offsets[0] += event.acceleration.x;
-      new_offsets[1] += event.acceleration.y;
-      new_offsets[2] += event.acceleration.z;
+    sensors_event_t event;
+    lis3dh.getEvent(&event);
 
-      delay(rate);
-    }
+    new_offsets[0] += event.acceleration.x;
+    new_offsets[1] += event.acceleration.y;
+    new_offsets[2] += event.acceleration.z;
+
+    delay(CALIBRATION_DELAY);
   }
 
-  offsets[0] = -new_offsets[0] / total;
-  offsets[1] = -new_offsets[1] / total;
-  offsets[2] = -new_offsets[2] / total;
+  offsets[0] = -new_offsets[0] * cal_size_inverse;
+  offsets[1] = -new_offsets[1] * cal_size_inverse;
+  offsets[2] = -new_offsets[2] * cal_size_inverse;
 
   save_offsets();
 
   custom_offsets = true;
 
   lcd.clear();
-  lcd.print("Calibration success.");
+  lcd.print("Calibration");
+  lcd.setCursor(0, 1);
+  lcd.print("success.");
   delay(3000);
   lcd.clear();
 }
 
 void reset()
 {
-  lcd.clear();
-  lcd.print("Offsets have been reset.");
-
   offsets[0] = 0.0;
   offsets[1] = 0.0;
   offsets[2] = 0.0;
@@ -312,6 +315,13 @@ void reset()
   save_offsets();
 
   custom_offsets = false;
+
+  lcd.clear();
+  lcd.print("Offsets");
+  lcd.setCursor(0, 1);
+  lcd.print("have been");
+  lcd.setCursor(0, 2);
+  lcd.print("reset.");
 
   delay(3000);
   lcd.clear();
@@ -343,7 +353,7 @@ void loop()
   //   go_to_sleep();
   //   sleep_counter = 0;
   // }
-  
+
   if (digitalRead(BUTTON) == LOW)
   {
     ++hold_counter;
@@ -352,8 +362,16 @@ void loop()
     if (hold_counter >= calibrate_hold_count)
     {
       lcd.clear();
-      lcd.print("Release the button to calibrate, hold further to reset.");
-      
+      lcd.print("Release the");
+      lcd.setCursor(0, 1);
+      lcd.print("button to");
+      lcd.setCursor(0, 2);
+      lcd.print("calibrate,");
+      lcd.setCursor(0, 3);
+      lcd.print("hold further");
+      lcd.setCursor(0, 4);
+      lcd.print("to reset.");
+
       while (digitalRead(BUTTON) == LOW)
       {
         if (++hold_counter == reset_hold_count)
@@ -362,7 +380,7 @@ void loop()
         }
         delay(BASE_DELAY);
       }
-      
+
       if (hold_counter < reset_hold_count)
       {
         calibrate();
@@ -373,7 +391,12 @@ void loop()
     if (hold_counter == reset_hold_count)
     {
       lcd.clear();
-      lcd.print("Release the button to reset.");
+      lcd.print("Release the");
+      lcd.setCursor(0, 1);
+      lcd.print("button to");
+      lcd.setCursor(0, 2);
+      lcd.print("reset.");
+
       while (digitalRead(BUTTON) == LOW)
       {
         delay(BASE_DELAY);
@@ -394,10 +417,13 @@ void loop()
 
   if (acc_counter == sample_count)
   {
+    float values[3] = {0.0};
+
     sensors_event_t event;
     lis3dh.getEvent(&event);
+    calc_acc(event, values);
 
-    print_acc(event);
+    print_acc(values);
     acc_counter = 0;
   }
   else
