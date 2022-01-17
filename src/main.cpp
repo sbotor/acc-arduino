@@ -57,8 +57,8 @@ const int calibrate_hold_count = CALIBRATE_HOLD_TIME / BASE_DELAY;
 const int reset_hold_count = RESET_HOLD_TIME / BASE_DELAY;
 int hold_counter = 0;
 
-const int sleep_threshold = TIME_TO_SLEEP / BASE_DELAY;
-int sleep_counter = 0;
+//const int sleep_threshold = TIME_TO_SLEEP / BASE_DELAY;
+//int sleep_counter = 0;
 
 void read_offsets()
 {
@@ -257,18 +257,23 @@ void print_acc(sensors_event_t &event)
 void calibrate()
 {
   float new_offsets[3] = {0.0};
+  const int times = 3, // TODO
+    rate = 100,
+    samples = 1000 / rate,
+    total = samples * times;
 
-  for (int i = 0; i < 5; i++)
+  for (int i = 0; i < times; i++)
   {
     lcd.clear();
     lcd.print("Calibrating, please wait.");
     lcd.setCursor(0, 2);
 
     char buffer[64] = {0};
-    sprintf(buffer, "Progress: %d/5", i);
+    float prog = 100.0 * i / times;
+    sprintf(buffer, "Progress: %.1f%%", prog);
     lcd.print(buffer);
-
-    for (int j = 0; j < 5; j++)
+    
+    for (int j = 0; j < samples; j++)
     {
       sensors_event_t event;
       lis3dh.getEvent(&event);
@@ -277,13 +282,13 @@ void calibrate()
       new_offsets[1] += event.acceleration.y;
       new_offsets[2] += event.acceleration.z;
 
-      delay(200);
+      delay(rate);
     }
   }
 
-  offsets[0] = -new_offsets[0] / 25;
-  offsets[1] = -new_offsets[1] / 25;
-  offsets[2] = -new_offsets[2] / 25;
+  offsets[0] = -new_offsets[0] / total;
+  offsets[1] = -new_offsets[1] / total;
+  offsets[2] = -new_offsets[2] / total;
 
   save_offsets();
 
@@ -333,16 +338,16 @@ void go_to_sleep()
 
 void loop()
 {
-  if (sleep_counter == sleep_threshold)
-  {
-    go_to_sleep();
-    sleep_counter = 0;
-  }
+  // if (sleep_counter == sleep_threshold)
+  // {
+  //   go_to_sleep();
+  //   sleep_counter = 0;
+  // }
   
   if (digitalRead(BUTTON) == LOW)
   {
     ++hold_counter;
-    sleep_counter = 0;
+    //sleep_counter = 0;
 
     if (hold_counter >= calibrate_hold_count)
     {
@@ -384,7 +389,7 @@ void loop()
       ++display;
     }
     hold_counter = 0;
-    ++sleep_counter;
+    //++sleep_counter;
   }
 
   if (acc_counter == sample_count)
