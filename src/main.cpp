@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <EEPROM.h>
-#include <avr/sleep.h>
 
 #include <PCD8544.h>
 #include <Adafruit_LIS3DH.h>
@@ -13,7 +12,6 @@
 
 #define SDA A4
 #define SDL A5
-#define INTERRUPT 2
 #define ACC_DELAY 500
 
 #define LEDC 4
@@ -27,8 +25,7 @@
 #define BUTTON A1
 #define BASE_DELAY 50
 #define CALIBRATE_HOLD_TIME 3000
-#define RESET_HOLD_TIME 7000
-#define TIME_TO_SLEEP 5000
+#define RESET_HOLD_TIME 5000
 
 #define CALIBRATION_DELAY 100
 #define CALIBRATION_SAMPLE_SIZE 20
@@ -64,9 +61,6 @@ const int calibrate_hold_count = CALIBRATE_HOLD_TIME / BASE_DELAY;
 const int reset_hold_count = RESET_HOLD_TIME / BASE_DELAY;
 int hold_counter = 0;
 
-//const int sleep_threshold = TIME_TO_SLEEP / BASE_DELAY;
-//int sleep_counter = 0;
-
 void read_offsets()
 {
   EEPROM.get(0, offsets[0]);
@@ -101,7 +95,6 @@ void setup()
   pinMode(LEDL, OUTPUT);
 
   pinMode(BUTTON, INPUT);
-  pinMode(INTERRUPT, INPUT);
 
   clear_leds();
 
@@ -179,38 +172,41 @@ void light_leds(float* vals)
 
 void calc_acc(sensors_event_t &event, float *values)
 {
+  // Get acceleration readings without offsets
   raw_acc[0] = event.acceleration.x;
   raw_acc[1] = event.acceleration.y;
   raw_acc[2] = event.acceleration.z;
 
+  // Apply offsets
   offset_acc[0] = values[0] = raw_acc[0] + offsets[0];
   offset_acc[1] = values[1] = raw_acc[1] + offsets[1];
   offset_acc[2] = values[2] = raw_acc[2] + offsets[2];
 
-  float x_2 = values[0] * values[0],
-        y_2 = values[1] * values[1],
-        z_2 = values[2] * values[2];
-
-  //values[3] = sqrt(x_2 + y_2 + z_2);
-
-  switch (display)
+  if (display == display_mode::ACC)
   {
-  case display_mode::ACC:
+    // values = acc+offsets
+    values[0] = offset_acc[0];
+    values[1] = offset_acc[1];
+    values[2] = offset_acc[2];
     return;
-  case display_mode::RAD:
+  }
+  else
   {
+    // Find squares of values
+    float x_2 = values[0] * values[0],
+          y_2 = values[1] * values[1],
+          z_2 = values[2] * values[2];
+
+    // Get values in radians
     values[0] = atan2(x_2, sqrt(y_2 + z_2));
     values[1] = atan2(y_2, sqrt(x_2 + z_2));
-    //values[2] = atan2(sqrt(x_2 + y_2), z_2);
-    break;
-  }
-  case display_mode::DEG:
-  {
-    values[0] = atan2(x_2, sqrt(y_2 + z_2)) * 57.3;
-    values[1] = atan2(y_2, sqrt(x_2 + z_2)) * 57.3;
-    //values[2] = atan2(sqrt(x_2 + y_2), z_2) * 57.3;
-    break;
-  }
+    
+    if (display == display_mode::DEG)
+    {
+      // Convert to degrees if needed
+      values[0] *= 57.3;
+      values[1] *= 57.3;
+    }
   }
 
   if (offset_acc[0] < 0)
@@ -225,9 +221,8 @@ void calc_acc(sensors_event_t &event, float *values)
 
 void print_acc(float *values)
 {
-  light_leds(offset_acc);
-
-  lcd.clear();
+  //lcd.clear();
+  lcd.setCursor(0, 0);
   if (custom_offsets)
   {
     lcd.print("* ");
@@ -267,18 +262,19 @@ void calibrate()
   float new_offsets[3] = {0.0};
 
   lcd.clear();
-  lcd.print("Calibrating, please wait.");
+  lcd.print("Calibrating,");
+  lcd.setCursor(0, 1);
+  lcd.print("hold still.");
 
   for (int i = 0; i < CALIBRATION_SAMPLE_SIZE; i++)
   {
-    char buffer[32] = {0};
     float prog = 100.0 * i * cal_size_inverse;
 
-    lcd.setCursor(0, 2);
+    lcd.setCursor(0, 3);
     lcd.print("Progress:");
-    sprintf(buffer, "%.1f\%", prog);
     lcd.setCursor(0, 4);
-    lcd.print(buffer);
+    lcd.print(prog);
+    lcd.print("%");
 
     sensors_event_t event;
     lis3dh.getEvent(&event);
@@ -327,37 +323,11 @@ void reset()
   lcd.clear();
 }
 
-void wake_up()
-{
-  sleep_disable();
-  detachInterrupt(digitalPinToInterrupt(INTERRUPT));
-}
-
-void go_to_sleep()
-{
-  lis3dh.setClick(1, CLICK_THRESHOLD);
-  delay(1000);
-  lcd.clear();
-  clear_leds();
-
-  attachInterrupt(digitalPinToInterrupt(INTERRUPT), wake_up, CHANGE);
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  sleep_enable();
-  sleep_cpu();
-}
-
 void loop()
 {
-  // if (sleep_counter == sleep_threshold)
-  // {
-  //   go_to_sleep();
-  //   sleep_counter = 0;
-  // }
-
   if (digitalRead(BUTTON) == LOW)
   {
     ++hold_counter;
-    //sleep_counter = 0;
 
     if (hold_counter >= calibrate_hold_count)
     {
@@ -410,9 +380,9 @@ void loop()
     if (hold_counter > 0)
     {
       ++display;
+      lcd.clear();
     }
     hold_counter = 0;
-    //++sleep_counter;
   }
 
   if (acc_counter == sample_count)
@@ -421,9 +391,12 @@ void loop()
 
     sensors_event_t event;
     lis3dh.getEvent(&event);
+    
     calc_acc(event, values);
 
+    light_leds(offset_acc);
     print_acc(values);
+    
     acc_counter = 0;
   }
   else
