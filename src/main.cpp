@@ -204,7 +204,7 @@ void calc_acc(sensors_event_t &event, float *values)
     if (display == display_mode::DEG)
     {
       // Convert to degrees if needed
-      values[0] *= 57.3;
+      values[0] *= 57.3;\
       values[1] *= 57.3;
     }
   }
@@ -242,10 +242,12 @@ void print_acc(float *values)
   }
 
   lcd.setCursor(0, 2);
+  lcd.clearLine();
   lcd.print("X: ");
   lcd.print(values[0]);
 
   lcd.setCursor(0, 3);
+  lcd.clearLine();
   lcd.print("Y: ");
   lcd.print(values[1]);
 
